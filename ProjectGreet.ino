@@ -1,71 +1,251 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 #include <SPI.h>
-#include "MFRC522.h"
+#include <MFRC522.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <map>
+#include <time.h>
 
-#define SS_PIN  5  // ESP32 pin GPIO5 
-#define RST_PIN 27 // ESP32 pin GPIO27 
+const char* ssid = "the_tech_academy";
+const char* password = "TtaisThebest1";
 
-MFRC522 rfid(SS_PIN, RST_PIN);
+const char* scriptURL = "https://script.google.com/macros/s/AKfycby1dP55iOmh3-_Jrp5abLZZ6yz7VAKiwol9ZMQMHTzLZT4hB0THACxJFuKKVAEQHU6s/exec"; // Replace with your Google Apps Script URL
 
-// Array of recognized UUIDs
-String UUIDs[] = {"B1EE9A06", 
-                  "51312645", 
-                  "935BA84B", 
-                  "61E2CA45", 
-                  "627DFD4B", 
-                  "336C360E", 
-                  "F1B31C06", 
-                  "73FC5A4B", 
-                  "23D53B0E", 
-                  "B363E54B", 
-                  "F1B6B706"};
+// NTP Configuration
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 21600;
+const int daylightOffset_sec = 0;
 
-const int UUID_COUNT = sizeof(UUIDs) / sizeof(UUIDs[0]);
+#define RST_PIN 27
+#define SS_PIN 5
+
+
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+
+struct CardData {
+  String uid;
+  String name;
+};
+
+
+CardData cards[] = {
+  {"039D5F17", "RAHAT"},
+  {"13870317", "REMON"},
+  {"33E54D17", "SHAMS"},
+  {"6314E816", "NAHIYAN"},
+  {"238ECD1B", "MUHAIMIN"},
+  {"A3D9EA16", "ANIKA"},
+  {"13F15117", "ABONTEE"},
+  {"93AA5E15", "DEBUG"}
+};
+
+std::map<String, String> cardEntryTimes;
+
+String getCardID();
+String findCardOwner(String uid);
+String getTimestamp();
+String calculateDuration(String entryTime, String exitTime);
+void sendToGoogleSheet(String name, String uid, String entryTime, String exitTime, String duration);
 
 void setup() {
-  Serial.begin(9600);
-  SPI.begin(); // init SPI bus
-  rfid.PCD_Init(); // init MFRC522
+  Serial.begin(115200);
+  pinMode(13, OUTPUT);
 
-  Serial.println("Tap an RFID/NFC tag on the RFID-RC522 reader");
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWi-Fi Connected");
+
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  Serial.println("Time Synchronized");
+
+
+  SPI.begin();
+  mfrc522.PCD_Init();
+  Serial.println("RFID Ready");
+
+
+  Wire.begin(4, 22); // Pin 4 SDA and Pin 22 SCL for LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.print("Ready to Scan...");
 }
 
 void loop() {
-  if (rfid.PICC_IsNewCardPresent()) { // new tag is available
-    if (rfid.PICC_ReadCardSerial()) { // NUID has been read
-      Serial.print("RFID/NFC Tag Type: ");
-      Serial.println(rfid.PICC_GetTypeName(rfid.PICC_GetType(rfid.uid.sak)));
 
-      // Extract and print UID in hexadecimal format
-      String uuid = ""; // Variable to store UUID as a string
-      for (int i = 0; i < rfid.uid.size; i++) {
-        // Convert byte to hex and append to the string
-        if (rfid.uid.uidByte[i] < 0x10) {
-          uuid += "0";
-        }
-        uuid += String(rfid.uid.uidByte[i], HEX);
-      }
-      uuid.toUpperCase(); // Ensure the UUID is in uppercase for consistency
+  if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+    String uid = getCardID();
+    Serial.println("UID: " + uid);
+    
+  
+    String owner = findCardOwner(uid);
 
-      Serial.print("UUID (as string): ");
-      Serial.println(uuid); // Print the UUID as a single string
+    if (owner != "") {
 
-      // Check if the UUID is in the array
-      bool recognized = false;
-      for (int i = 0; i < UUID_COUNT; i++) {
-        if (uuid == UUIDs[i]) {
-          recognized = true;
-          break;
-        }
-      }
+      String timeStamp = getTimestamp();
 
-      if (recognized) {
-        Serial.println("Card Recognized!");
+    
+      if (cardEntryTimes.find(uid) == cardEntryTimes.end()) {
+        // Entry Case
+        cardEntryTimes[uid] = timeStamp;
+        //beep a buzzer
+        digitalWrite(13, HIGH);
+        delay(100);
+        digitalWrite(13, LOW);
+        lcd.clear();
+        lcd.print("Welcome, ");
+        lcd.setCursor(0, 1);
+        lcd.print(owner);
+        Serial.println("Entry Recorded: " + timeStamp);
       } else {
-        Serial.println("Card not recognized.");
-      }
+  // Exit case
+  String entryTime = cardEntryTimes[uid];
+  String exitTime = timeStamp;
+        
+  //Duration of Stay
+  String duration = calculateDuration(entryTime, exitTime);
 
-      rfid.PICC_HaltA(); // halt PICC
-      rfid.PCD_StopCrypto1(); // stop encryption on PCD
+  // Check if it's less than 1 minutes
+  int hours, minutes, seconds;
+  sscanf(duration.c_str(), "%d:%d:%d", &hours, &minutes, &seconds);
+  int totalSeconds = hours * 3600 + minutes * 60 + seconds;
+
+  if (totalSeconds < 60) { // Less than 1 minute
+    lcd.clear();
+    lcd.print("Already Scanned!");
+    Serial.println("Card scanned too soon after entry. Ignored.");
+  } else {
+    //beep a buzzer
+    digitalWrite(13, HIGH);
+    delay(100);
+    digitalWrite(13, LOW);
+    lcd.clear();
+    lcd.print("See You Next");
+    lcd.setCursor(0, 1);
+    lcd.print("Time, ");
+    lcd.setCursor(7, 1);
+    lcd.print(owner);
+
+    // Send data to Google Sheet
+    sendToGoogleSheet(owner, uid, entryTime, exitTime, duration);
+
+    Serial.println("Exit Recorded: " + exitTime);
+    Serial.println("Duration: " + duration);
+
+
+    cardEntryTimes.erase(uid);
+  }
+    } 
+  }
+    else {
+    
+      Serial.println("Unknown Card");
+      lcd.clear();
+      lcd.print("Unknown Card");
     }
+
+  
+    delay(3000);
+    lcd.clear();
+    lcd.print("Ready to Scan...");
+
+    // Halt the RFID reader
+    mfrc522.PICC_HaltA();
   }
 }
+
+
+String getCardID() {
+  String cardID = "";
+  for (byte i = 0; i < mfrc522.uid.size; i++) {
+    if (mfrc522.uid.uidByte[i] < 0x10) {
+      cardID += "0"; //for single hex digits
+    }
+    cardID += String(mfrc522.uid.uidByte[i], HEX);
+  }
+  cardID.toUpperCase();
+  return cardID;
+}
+
+
+String findCardOwner(String uid) {
+  for (int i = 0; i < sizeof(cards) / sizeof(cards[0]); i++) {
+    if (cards[i].uid == uid) {
+      return cards[i].name;
+    }
+  }
+  return ""; // Return empty string if card not found
+}
+
+
+String getTimestamp() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+    return "N/A";
+  }
+
+  char timeString[20];
+  strftime(timeString, sizeof(timeString), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return String(timeString);
+}
+
+
+String calculateDuration(String entryTime, String exitTime) {
+  // Parse the timestamps into time structures
+  struct tm entryTm, exitTm;
+  if (strptime(entryTime.c_str(), "%Y-%m-%d %H:%M:%S", &entryTm) == nullptr ||
+      strptime(exitTime.c_str(), "%Y-%m-%d %H:%M:%S", &exitTm) == nullptr) {
+    return "Invalid Time";
+  }
+
+  
+  time_t entryTimeT = mktime(&entryTm);
+  time_t exitTimeT = mktime(&exitTm);
+
+  
+  double difference = difftime(exitTimeT, entryTimeT);
+
+
+  int hours = difference / 3600;
+  int minutes = ((int)difference % 3600) / 60;
+  int seconds = (int)difference % 60;
+
+
+  char durationString[10];
+  snprintf(durationString, sizeof(durationString), "%02d:%02d:%02d", hours, minutes, seconds);
+
+  return String(durationString);
+}
+
+
+
+void sendToGoogleSheet(String name, String uid, String entryTime, String exitTime, String duration) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(scriptURL);
+    http.addHeader("Content-Type", "application/json");
+
+    
+    String payload = "{\"name\":\"" + name + "\",\"uid\":\"" + uid + "\",\"entryTime\":\"" + entryTime + "\",\"exitTime\":\"" + exitTime + "\",\"duration\":\"" + duration + "\"}";
+    
+    int httpResponseCode = http.POST(payload);
+    if (httpResponseCode > 0) {
+      Serial.println("Data Sent: " + payload);
+    } else {
+      Serial.println("Error Sending Data: " + String(httpResponseCode));
+    }
+    http.end();
+  } else {
+    Serial.println("WiFi Disconnected");
+  }
+}
+
+
